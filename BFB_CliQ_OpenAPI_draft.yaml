@@ -1,0 +1,852 @@
+openapi: 3.1.0
+info:
+  title: BFB payments CliQ API
+  version: 0.1.0-draft
+  description: 'Драфт четырёх методов канального API микросервиса payments по требованиям BFB CliQ v0.2. Предназначен
+    для Web/Mobile и корпоративного портала. Это предлагаемый внутренний контракт BFB, не официальный API CliQ.
+
+
+    Сценарий: GET aliases → POST payment-validations → просмотр снимка и подтверждение BFB → POST payments → GET
+    payments/{operationId}. Методы IAM/OTP, согласований и регистрация не входят в этот фрагмент. Примеры полностью
+    синтетические.
+
+
+    Правила авторизации применяются на сервере к каждому счёту и ресурсу. BFB-сессия определяет пользователя и клиента;
+    X-Corporate-Id выбирает проверяемый корпоративный контекст. Секреты подтверждения маскируются во всех журналах.
+    Ответы с клиентскими данными имеют Cache-Control: no-store. Все timestamps передаются в UTC.
+
+
+    Имена путей, полей, статусы алиасов, bearer-аутентификация и параметры пагинации являются решениями драфта и
+    требуют согласования. Числовые лимиты и срок жизни подтверждения не назначены произвольно: их определяет политика
+    BFB. Точность до трёх десятичных знаков — допущение для обсуждения.'
+servers:
+- url: https://payments.bfb.example/v1
+  description: Условный адрес; заменить адресом среды BFB.
+security:
+- bfbBearer: []
+tags:
+- name: Aliases
+  description: Доступные алиасы профиля
+- name: Payments
+  description: Проверка и исполнение исходящего CliQ-перевода
+paths:
+  /cliq/aliases:
+    get:
+      operationId: listCliqAliases
+      tags:
+      - Aliases
+      summary: Получить доступные алиасы и связи со счетами
+      description: Возвращает страницу алиасов текущего клиента/компании. Для полного списка читать nextCursor до
+        его отсутствия. Алиасы и счета вне полномочий не раскрываются.
+      x-requirement-ids:
+      - FR-01
+      - FR-09
+      - FR-11
+      x-parent-br:
+      - BR-01
+      parameters:
+      - $ref: '#/components/parameters/CorporateContext'
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      - name: cursor
+        in: query
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 2048
+      responses:
+        '200':
+          description: Страница алиасов; пустой items — допустимый результат.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasList'
+              example:
+                items:
+                - aliasId: alias-001
+                  type: ALIAS
+                  value: OMAR123
+                  status: ACTIVE
+                  accounts:
+                  - accountId: acc-jod-001
+                    isDefault: true
+                  - accountId: acc-jod-002
+                    isDefault: false
+                asOf: '2026-11-12T10:00:00Z'
+          headers: &id001
+            Cache-Control: &id003
+              description: Не сохранять платёжные данные в общих и клиентских HTTP-кешах.
+              schema:
+                type: string
+                enum:
+                - no-store
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /cliq/payment-validations:
+    post:
+      operationId: validateCliqPayment
+      tags:
+      - Payments
+      summary: Проверить перевод и сформировать снимок для подтверждения
+      description: Не создаёт финансовую операцию. Повторно разрешает получателя, проверяет допустимость счёта,
+        сумму, TTC, комиссию, средства и лимиты. Неуспех lookup — 503, а не отсутствие получателя. Клиент показывает
+        snapshot и получает подтверждение BFB перед отправкой. TTL возвращается в expiresAt.
+      x-requirement-ids:
+      - FR-01
+      - FR-05
+      - FR-17
+      - FR-19
+      - FR-22
+      - FR-23
+      - FR-24
+      x-parent-br:
+      - BR-02
+      - BR-03
+      parameters:
+      - $ref: '#/components/parameters/CorporateContext'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentValidationRequest'
+            example:
+              debtorAccountId: acc-jod-001
+              recipient:
+                type: ALIAS
+                value: OMAR123
+              money:
+                amount: '15.500'
+                currency: JOD
+              purposeCode: TTC_EXAMPLE
+              remittanceInformation: Invoice 123
+      responses:
+        '200':
+          description: Серверный снимок создан. Идентификатор purposeCode в примере условный.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentValidation'
+              example:
+                validationId: 2b207e51-7152-40f2-b295-d4cb90e26193
+                version: 1
+                expiresAt: '2026-11-12T10:05:00Z'
+                snapshotHash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+                snapshot: &id002
+                  debtorAccountId: acc-jod-001
+                  recipient:
+                    type: ALIAS
+                    value: OMAR123
+                    displayName: Omar Example
+                    routingReference: route-example-001
+                  money:
+                    amount: '15.500'
+                    currency: JOD
+                  purposeCode: TTC_EXAMPLE
+                  remittanceInformation: Invoice 123
+                  fee:
+                    amount: '0.100'
+                    currency: JOD
+                  totalDebit:
+                    amount: '15.600'
+                    currency: JOD
+                confirmationRequired: true
+          headers: *id001
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /cliq/payments:
+    post:
+      operationId: createCliqPayment
+      tags:
+      - Payments
+      summary: Принять подтверждённый перевод к исполнению
+      description: 'Сервер сначала проверяет сессию и контекст, затем ищет Idempotency-Key. Для существующего ключа
+        и того же тела возвращает текущее состояние прежней операции даже после истечения validation/confirmation;
+        финансовую команду повторно не исполняет. Для изменённого тела — 409 IDEMPOTENCY_CONFLICT. Одновременные
+        повторы сериализуются.
+
+
+        Для нового ключа проверяет срок/версию снимка, confirmationToken и согласования. Подтверждённая маршрутизация,
+        TTC и комиссия должны быть актуальны. Любое существенное изменение — 409 VALIDATION_STALE, требуется новый
+        снимок и подтверждение. Недостаток средств/лимита — 422; проверки выполняются повторно перед отправкой.
+        Лимит резервируется атомарно; UNKNOWN удерживает резерв до установления исхода.
+
+
+        Связь ключа с operationId сохраняется долговременно до внешнего вызова. Один validationId допускает одну
+        финансовую команду: его использование с новым ключом даёт 409 VALIDATION_ALREADY_USED. Корпоративное исполнение
+        допускается только после полного согласования; иначе 409 APPROVAL_REQUIRED.
+
+
+        202 означает долговременное принятие, не финансовый успех. После принятия сбой внешнего ответа отражается
+        как UNKNOWN, не как 503. Если канал потерял HTTP-ответ, он повторяет POST с тем же ключом и телом. Создавать
+        новый ключ для повтора запрещено. При повторе завершённой операции — 200, незавершённой — 202.'
+      x-requirement-ids:
+      - FR-02
+      - FR-18
+      - FR-19
+      - FR-20
+      - FR-21
+      - FR-24
+      - FR-25
+      - FR-26
+      - FR-27
+      - FR-28
+      x-parent-br:
+      - BR-02
+      - BR-03
+      parameters:
+      - $ref: '#/components/parameters/CorporateContext'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+            example:
+              validationId: 2b207e51-7152-40f2-b295-d4cb90e26193
+              validationVersion: 1
+              confirmationToken: opaque-confirmation-example
+              saveBeneficiary: false
+      responses:
+        '202':
+          description: Команда принята или возвращена прежняя нетерминальная операция.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+              example:
+                operationId: 3408c199-e8dc-4c34-aa4c-d1f3ed313e12
+                status: PROCESSING
+                snapshot: *id002
+                createdAt: '2026-11-12T10:00:00Z'
+                updatedAt: '2026-11-12T10:00:00Z'
+                statusUrl: /v1/cliq/payments/3408c199-e8dc-4c34-aa4c-d1f3ed313e12
+          headers:
+            Cache-Control: *id003
+            Location:
+              description: Адрес GET состояния принятой операции.
+              schema:
+                type: string
+                format: uri-reference
+              example: /v1/cliq/payments/3408c199-e8dc-4c34-aa4c-d1f3ed313e12
+            Retry-After:
+              description: Рекомендуемый интервал запроса статуса в секундах.
+              schema:
+                type: integer
+                minimum: 1
+              example: 2
+        '200':
+          description: Повтор ранее принятой операции в терминальном состоянии SUCCEEDED или FAILED.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+              example:
+                operationId: 3408c199-e8dc-4c34-aa4c-d1f3ed313e12
+                status: SUCCEEDED
+                snapshot: *id002
+                createdAt: '2026-11-12T10:00:00Z'
+                updatedAt: '2026-11-12T10:00:02Z'
+                statusUrl: /v1/cliq/payments/3408c199-e8dc-4c34-aa4c-d1f3ed313e12
+                bankPostingId: posting-example-001
+                schemeInstructionId: cliq-example-001
+          headers: *id001
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /cliq/payments/{operationId}:
+    get:
+      operationId: getCliqPayment
+      tags:
+      - Payments
+      summary: Получить актуальное состояние операции
+      description: Доступ разрешён только в исходном контексте клиента/компании и при наличии права просмотра. Для
+        чужого operationId возвращается 404. UNKNOWN и COMPENSATION_PENDING требуют дальнейшего наблюдения и сверки;
+        они не означают успешный возврат средств. Сам GET не отправляет финансовую команду повторно. Тайм-аут не
+        инициирует компенсацию.
+      x-requirement-ids:
+      - FR-01
+      - FR-26
+      - FR-27
+      - FR-28
+      - FR-45
+      x-parent-br:
+      - BR-02
+      - BR-03
+      parameters:
+      - $ref: '#/components/parameters/CorporateContext'
+      - $ref: '#/components/parameters/OperationId'
+      responses:
+        '200':
+          description: Текущее состояние; HTTP 200 не означает финансовый успех.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+              example:
+                operationId: 3408c199-e8dc-4c34-aa4c-d1f3ed313e12
+                status: UNKNOWN
+                snapshot: *id002
+                createdAt: '2026-11-12T10:00:00Z'
+                updatedAt: '2026-11-12T10:00:00Z'
+                statusUrl: /v1/cliq/payments/3408c199-e8dc-4c34-aa4c-d1f3ed313e12
+          headers:
+            Cache-Control: *id003
+            Retry-After:
+              description: Для нетерминального состояния — рекомендуемый интервал опроса в секундах.
+              schema:
+                type: integer
+                minimum: 1
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '503':
+          $ref: '#/components/responses/Error503'
+components:
+  securitySchemes:
+    bfbBearer:
+      type: http
+      scheme: bearer
+      description: Токен активной сессии BFB. Формат токена и его выдача определяются IAM BFB.
+  parameters:
+    CorporateContext:
+      name: X-Corporate-Id
+      in: header
+      required: false
+      description: Выбранная компания для корпоративной сессии. При наличии сервер проверяет полномочия пользователя
+        в компании; при отсутствии используется личный контекст. Идентификатор клиента берётся из проверенной сессии,
+        не из тела запроса.
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 'Уникальный ключ команды. Область: клиент/компания + вид операции SEND. Повтор должен использовать
+        тот же ключ и тело. Новый ключ создаёт новую команду.'
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: ^[A-Za-z0-9._:-]+$
+      example: send-20261112-001-7fdf65b8
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Error400:
+      description: Некорректный JSON, заголовок, курсор или формат поля
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:bfb:problem:invalid-request
+            title: Некорректный JSON, заголовок, курсор или формат поля
+            status: 400
+            code: INVALID_REQUEST
+            traceId: c7595ad3-1e36-4eb6-b7f1-31d56f34432d
+    Error401:
+      description: Отсутствует или недействительна сессия BFB
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:bfb:problem:unauthenticated
+            title: Отсутствует или недействительна сессия BFB
+            status: 401
+            code: UNAUTHENTICATED
+            traceId: c7595ad3-1e36-4eb6-b7f1-31d56f34432d
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          example: Bearer
+    Error403:
+      description: Действие запрещено или доказательство подтверждения недействительно
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:bfb:problem:forbidden
+            title: Действие запрещено или доказательство подтверждения недействительно
+            status: 403
+            code: FORBIDDEN
+            traceId: c7595ad3-1e36-4eb6-b7f1-31d56f34432d
+    Error404:
+      description: Ресурс не найден или недоступен в данном клиентском контексте
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:bfb:problem:not-found
+            title: Ресурс не найден или недоступен в данном клиентском контексте
+            status: 404
+            code: NOT_FOUND
+            traceId: c7595ad3-1e36-4eb6-b7f1-31d56f34432d
+    Error409:
+      description: Конфликт идемпотентности, устаревший снимок или незавершённые согласования
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:bfb:problem:conflict
+            title: Конфликт идемпотентности, устаревший снимок или незавершённые согласования
+            status: 409
+            code: CONFLICT
+            traceId: c7595ad3-1e36-4eb6-b7f1-31d56f34432d
+    Error422:
+      description: 'Бизнес-проверка не пройдена: сумма, TTC, лимит, средства или получатель'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:bfb:problem:business-validation-failed
+            title: 'Бизнес-проверка не пройдена: сумма, TTC, лимит, средства или получатель'
+            status: 422
+            code: BUSINESS_VALIDATION_FAILED
+            traceId: c7595ad3-1e36-4eb6-b7f1-31d56f34432d
+    Error429:
+      description: Превышен лимит частоты запросов; повтор после Retry-After
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:bfb:problem:rate-limited
+            title: Превышен лимит частоты запросов; повтор после Retry-After
+            status: 429
+            code: RATE_LIMITED
+            traceId: c7595ad3-1e36-4eb6-b7f1-31d56f34432d
+      headers:
+        Retry-After:
+          description: Задержка в секундах.
+          schema:
+            type: integer
+            minimum: 1
+          example: 5
+    Error503:
+      description: Сервис недоступен. Для POST payments это отказ до долговременного принятия команды
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:bfb:problem:service-unavailable
+            title: Сервис недоступен. Для POST payments это отказ до долговременного принятия команды
+            status: 503
+            code: SERVICE_UNAVAILABLE
+            traceId: c7595ad3-1e36-4eb6-b7f1-31d56f34432d
+      headers:
+        Retry-After:
+          description: Задержка в секундах.
+          schema:
+            type: integer
+            minimum: 1
+          example: 5
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 128
+      description: Непрозрачный идентификатор BFB. Передача значения не даёт права доступа.
+    DecimalAmount:
+      type: string
+      pattern: ^(0|[1-9][0-9]{0,14})(\.[0-9]{1,3})?$
+      examples:
+      - '15.500'
+      description: Точная сумма JOD без экспоненты и разделителей групп. До трёх знаков — допущение драфта; реальные
+        min/max/scale проверяются политикой. Ноль разрешён для комиссии, но запрещён для суммы платежа.
+    Money:
+      type: object
+      additionalProperties: false
+      properties:
+        amount:
+          $ref: '#/components/schemas/DecimalAmount'
+        currency:
+          type: string
+          enum:
+          - JOD
+      required:
+      - amount
+      - currency
+    RecipientInput:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum:
+          - ALIAS
+          - MOBILE
+          - IBAN
+        value:
+          type: string
+          minLength: 1
+          maxLength: 64
+      required:
+      - type
+      - value
+      description: Формат, нормализация и допустимость проверяются на сервере по типу. EMAIL не входит в исходящий
+        перевод этого драфта.
+    ResolvedRecipient:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum:
+          - ALIAS
+          - MOBILE
+          - IBAN
+        value:
+          type: string
+        displayName:
+          type: string
+        routingReference:
+          $ref: '#/components/schemas/Identifier'
+      required:
+      - type
+      - value
+      - displayName
+      - routingReference
+      description: routingReference — непрозрачная ссылка на подтверждённую маршрутизацию, а не раскрытый счёт чужого
+        клиента.
+    AliasAccount:
+      type: object
+      additionalProperties: false
+      properties:
+        accountId:
+          $ref: '#/components/schemas/Identifier'
+        isDefault:
+          type: boolean
+      required:
+      - accountId
+      - isDefault
+    Alias:
+      type: object
+      additionalProperties: false
+      properties:
+        aliasId:
+          $ref: '#/components/schemas/Identifier'
+        type:
+          type: string
+          enum:
+          - ALIAS
+          - MOBILE
+          - EMAIL
+        value:
+          type: string
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - SUSPENDED
+          - INACTIVE
+        accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AliasAccount'
+          minItems: 1
+      required:
+      - aliasId
+      - type
+      - value
+      - status
+      - accounts
+      description: Типы и внутренние статусы — допущение адаптера. Для активного маршрутизируемого алиаса ровно
+        один счёт default. Показываются только разрешённые алиасы и связи; алиас без права просмотра default не
+        включается в этот метод. EMAIL возвращается только при включении политикой.
+    AliasList:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Alias'
+        nextCursor:
+          type: string
+          minLength: 1
+          description: Отсутствует на последней странице.
+        asOf:
+          type: string
+          format: date-time
+      required:
+      - items
+      - asOf
+      description: Все страницы одной выборки относятся к одному снимку asOf; курсор связан с клиентом и фильтрами.
+        Изменённые параметры или просроченный курсор дают 400.
+    PaymentValidationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        debtorAccountId:
+          $ref: '#/components/schemas/Identifier'
+        recipient:
+          $ref: '#/components/schemas/RecipientInput'
+        money:
+          $ref: '#/components/schemas/Money'
+        purposeCode:
+          type: string
+          minLength: 1
+          maxLength: 35
+          description: TTC из разрешённого справочника BFB.
+        remittanceInformation:
+          type: string
+          maxLength: 140
+      required:
+      - debtorAccountId
+      - recipient
+      - money
+      - purposeCode
+    PaymentSnapshot:
+      type: object
+      additionalProperties: false
+      properties:
+        debtorAccountId:
+          $ref: '#/components/schemas/Identifier'
+        recipient:
+          $ref: '#/components/schemas/ResolvedRecipient'
+        money:
+          $ref: '#/components/schemas/Money'
+        purposeCode:
+          type: string
+        remittanceInformation:
+          type: string
+          maxLength: 140
+        fee:
+          $ref: '#/components/schemas/Money'
+        totalDebit:
+          $ref: '#/components/schemas/Money'
+      required:
+      - debtorAccountId
+      - recipient
+      - money
+      - purposeCode
+      - fee
+      - totalDebit
+      description: Подтверждаемые данные. totalDebit = money + fee, все значения в JOD. Снимок неизменяемый; комиссия
+        определяется банком.
+    PaymentValidation:
+      type: object
+      additionalProperties: false
+      properties:
+        validationId:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        expiresAt:
+          type: string
+          format: date-time
+        snapshotHash:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+          description: SHA-256 серверного канонического снимка; правила канонизации — часть реализации BFB.
+        snapshot:
+          $ref: '#/components/schemas/PaymentSnapshot'
+        confirmationRequired:
+          type: boolean
+          const: true
+      required:
+      - validationId
+      - version
+      - expiresAt
+      - snapshotHash
+      - snapshot
+      - confirmationRequired
+      description: Проверка полномочий, получателя, TTC, суммы, комиссии и средств. Не резервирует деньги и лимит.
+        Ссылка привязана к субъекту, клиенту/компании и операции SEND; срока действия из документа нет, сервер возвращает
+        expiresAt.
+    CreatePaymentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        validationId:
+          type: string
+          format: uuid
+        validationVersion:
+          type: integer
+          minimum: 1
+        confirmationToken:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Непрозрачное доказательство подтверждения BFB. Связано с пользователем, SEND, validationId/version
+            и snapshotHash. Проверяется сервером; никогда не логируется.
+        approvalReference:
+          $ref: '#/components/schemas/Identifier'
+        saveBeneficiary:
+          type: boolean
+          default: false
+      required:
+      - validationId
+      - validationVersion
+      - confirmationToken
+      description: 'Сумма, получатель, комиссия и счёт берутся из серверного снимка. Для корпоративного клиента
+        approvalReference обязателен: сервер проверяет актуальность всех согласований этой версии. Методы OTP и
+        корпоративного согласования находятся вне данного фрагмента API.'
+    PaymentStatus:
+      type: string
+      enum:
+      - READY
+      - PROCESSING
+      - SUCCEEDED
+      - FAILED
+      - UNKNOWN
+      - COMPENSATION_PENDING
+      description: 'READY: команда сохранена. PROCESSING: исполнение начато. SUCCEEDED: подтверждены финальный успех
+        CliQ и проводки. FAILED: окончательный отказ без непогашенных проводок. UNKNOWN: исход уточняется. COMPENSATION_PENDING:
+        окончательный отказ после проводки, урегулирование не завершено. UNKNOWN не является разрешением повторного
+        списания.'
+    Payment:
+      type: object
+      additionalProperties: false
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        snapshot:
+          $ref: '#/components/schemas/PaymentSnapshot'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        bankPostingId:
+          $ref: '#/components/schemas/Identifier'
+        schemeInstructionId:
+          $ref: '#/components/schemas/Identifier'
+        failureCode:
+          type: string
+          description: Код окончательной причины отказа; только для FAILED или COMPENSATION_PENDING.
+        statusUrl:
+          type: string
+          format: uri-reference
+      required:
+      - operationId
+      - status
+      - snapshot
+      - createdAt
+      - updatedAt
+      - statusUrl
+      description: Внешние идентификаторы возвращаются, когда известны. Отсутствие идентификатора не доказывает
+        отсутствие проводки. Для нетерминальных состояний канал продолжает запрос статуса.
+    Problem:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+        detail:
+          type: string
+        traceId:
+          type: string
+          format: uuid
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              field:
+                type: string
+              code:
+                type: string
+              message:
+                type: string
+            required:
+            - field
+            - code
+            - message
+      required:
+      - type
+      - title
+      - status
+      - code
+      - traceId
+      description: Единый формат ошибки. detail и errors не содержат секретов или чужих реквизитов. status совпадает
+        с HTTP-кодом; traceId генерирует сервер.
+x-draft-decisions:
+- Область API — исходящий перевод по ALIAS, MOBILE и IBAN; регистрация, QR, RTP, возвраты и bulk вне данного фрагмента.
+- Проверка платежа создаёт неизменяемый серверный снимок; отдельный сервис BFB выдаёт связанное с ним доказательство
+  подтверждения.
+- Срок жизни validation и confirmation, TTL idempotency-key, retention операций и SLA финального ответа CliQ требуется
+  согласовать. Драфт не разрешает повторное использование истёкшего ключа для новой операции; до определения TTL
+  записи ключей не удаляются.
+- Границы суммы, точность JOD, TTC, лимиты и комиссии определяются версионируемой политикой. Примеры и регулярное
+  выражение на три знака не утверждают min/max проекта.
+- При обнаружении нового payload для того же ключа — конфликт. Сравнивается каноническое тело, включая validation,
+  confirmation и saveBeneficiary; детали канонизации согласуются до реализации.
+- Корпоративный maker/checker процесс реализуется другими методами. approvalReference связывается с тем же snapshotHash,
+  пользователем/компанией и актуальной матрицей прав.
+- Сохранять получателя разрешено только после SUCCEEDED и saveBeneficiary=true; ошибка сохранения не повторяет перевод.
+- 'Для просмотра списка выбран snapshot cursor: срок снимка и максимальный объём согласуются до реализации. Окончательные
+  форматы alias/mobile/IBAN определяются контрактом BFB/CliQ.'
